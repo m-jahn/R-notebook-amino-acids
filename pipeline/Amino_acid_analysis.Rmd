@@ -1,0 +1,336 @@
+---
+title: "Effect of amino acid supplementation on fitness in a CRISPRi library"
+output:
+  html_notebook:
+    theme: cosmo
+    toc: yes
+    number_sections: yes
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+----------
+
+# Description
+
+This R notebook details the data processing and visualization for growth competition experiments with a CRISPRi sgRNA library. The library contains around 20,000 unique sgRNA repression mutants tailored for the cyanobacterium _Synechocystis_ sp. PCC6803. The library each gene with up to five sgRNAs. In some cases, genes or ncRNAs have less than 5 sgRNAs because the ORF was too short to design a full set of different sgRNAs.
+
+- The detailed description of the library can be found in this github repo: https://github.com/m-jahn/R-notebook-crispri-lib.
+- The sequencing data was processed using a semi-automatic pipeline:
+https://github.com/m-jahn/crispri-lib-pipe.
+- The first version of the _Synechocystis_ sgRNA library was [published in Nature Communications, 2020](https://www.nature.com/articles/s41467-020-15491-7).
+- The second version of the library is currently being prepared for publication (2022).
+
+# Prerequisites
+
+Load required packages.
+
+```{r, message = FALSE }
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggrepel)
+  library(lattice)
+  library(scales)
+  library(KEGGREST)
+  library(ggpubr)
+  library(httr)
+})
+```
+
+Define global figure style, default colors, and a plot saving function.
+
+```{r, echo = FALSE}
+# custom ggplot2 theme that is reused for all later plots
+custom_colors = c("#E7298A", "#66A61E", "#E6AB02", "#7570B3", "#B3B3B3", "#1B9E77", "#D95F02", "#A6761D")
+custom_range <- function(n = 5) {colorRampPalette(custom_colors[c(1,5,2)])(n)}
+
+custom_theme <- function(base_size = 12, base_line_size = 1.0, base_rect_size = 1.0, ...) {
+  theme_light(base_size = base_size, base_line_size = base_line_size, base_rect_size = base_rect_size) + theme(
+    title = element_text(colour = grey(0.4), size = 10),
+    plot.margin = unit(c(12,12,12,12), "points"),
+    axis.ticks.length = unit(0.2, "cm"),
+    axis.ticks = element_line(colour = grey(0.4), linetype = "solid", lineend = "round"),
+    axis.text.x = element_text(colour = grey(0.4), size = 10),
+    axis.text.y = element_text(colour = grey(0.4), size = 10),
+    panel.grid.major = element_line(size = 0.6, linetype = "solid", colour = grey(0.9)),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(linetype = "solid", colour = grey(0.4), fill = NA, size = 1.0),
+    panel.background = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(colour = grey(0.4), size = 10, margin = unit(rep(3,4), "points")),
+    legend.text = element_text(colour = grey(0.4), size = 10),
+    legend.title = element_blank(),
+    legend.background = element_blank(),
+    ...
+  )
+}
+
+# set graphical parameter for subfigure labels
+list_fontpars <- list(face = "plain", size = 14)
+
+# function to export an image as svg and png
+save_plot <- function(pl, path = "../figures/", width = 6, height = 6) {
+  pl_name <- deparse(substitute(pl))
+  svg(filename = paste0(path, pl_name, ".svg"),
+    width = width, height = height)
+  print(pl)
+  dev.off()
+  png(filename = paste0(path, pl_name, ".png"),
+    width = width*125, height = height*125, res = 120)
+  print(pl)
+  invisible(capture.output(dev.off()))
+}
+```
+
+
+# Quality control
+
+## Data import
+
+Load raw data. The main table contains already normalized quantification of all sgRNAs, fold change, multiple hypothesis corrected p-values, and fitness score. Contrary to the processing of [our first CRISPRi library V1](https://github.com/m-jahn/R-notebooks), much of the functionality from the notebook was transferred into the [new CRISPRi library pipeline on github](https://github.com/m-jahn/CRISPRi-lib-pipe).
+
+```{r}
+# load main table with processed sequencing data
+load("../data/input/DESeq2_result.Rdata")
+df_main <- DESeq_result_table
+rm(DESeq_result_table)
+```
+
+
+## Data annotation
+
+Different annotation columns are added to the main data frame, including a short sgRNA identifier (excluding the position on the gene), an sgRNA index (1 to 5), and genome annotation from Uniprot. The Uniprot data is dynamically downloaded for every update of this pipeline using their very simple API (`read_tsv("https://www.uniprot.org/uniprot/?query=taxonomy:1111708&format=tab")`). The full list of columns that can be queried is available [here](https://www.uniprot.org/help/uniprotkb_column_names).
+Pathway annotation from KEGG is later in the pipeline added using the `KEGGREST` package.
+
+```{r, message = FALSE}
+
+df_main <- df_main %>%
+  mutate(sgRNA_type = if_else(grepl("^nc_", sgRNA), "ncRNA", "gene")) %>%
+  ungroup %>%
+  # map trivial names to locus tags using a manually curated list
+  left_join(
+    read_tsv(paste0("https://raw.githubusercontent.com/",
+      "m-jahn/R-notebook-crispri-lib/master/sgRNA_library_V2/",
+      "data/input/mapping_trivial_names.tsv"), col_types = cols()),
+    by = c("sgRNA_target" = "gene"))
+```
+
+Overview about the different conditions.
+
+```{r}
+df_main %>% group_by(condition) %>%
+  summarize(
+    time_points = paste(unique(time), collapse = ", "),
+    min_fit = min(fitness),
+    med_fit = median(fitness),
+    max_fit = max(fitness))
+```
+
+Retrieve gene info from uniprot and merge with main data frame. We need to make a custom function to retrieve and parse the data from uniprot, because of a bug in the security level on Ubuntu 20.04. The fallback option is to load a local copy of uniprot annotation for this organism.
+
+```{r}
+uniprot_url <- paste0(
+   "https://www.uniprot.org/uniprot/?query=taxonomy:1111708&format=tab&",
+   "columns=id,genes,genes(PREFERRED),protein_names,length,mass,ec,database(KEGG)")
+
+get_uniprot <- function(url) {
+  # reset security level, caused by a faulty SSL certificate on server side,
+  # see this thread: https://github.com/Ensembl/ensembl-rest/issues/427
+  httr_config <- config(ssl_cipher_list = "DEFAULT@SECLEVEL=1")
+  res <- with_config(config = httr_config, GET(url))
+  server_error = simpleError("")
+  df_uniprot <- tryCatch(
+    read_tsv(content(res), col_types = cols()),
+    error = function(server_error) {
+      message("Uniprot server not available, falling back on local Uniprot DB copy")
+      read_tsv("../data/input/uniprot_synechocystis.tsv", col_types = cols())
+    }
+  )
+}
+
+df_uniprot <- get_uniprot(uniprot_url) %>%
+  rename_with(tolower) %>%
+  rename(locus = `cross-reference (kegg)`, gene_name = `gene names`,
+    gene_name_short = `gene names  (primary )`, ec_number = `ec number`,
+    protein = `protein names`, uniprot_ID = entry
+  ) %>%
+  separate_rows(locus, sep = ";syn:") %>%
+  mutate(locus = str_remove_all(locus, "syn:|;")) %>%
+  filter(!is.na(locus))
+
+df_main <- left_join(df_main, filter(df_uniprot, !duplicated(locus)),
+  by = "locus")
+```
+
+
+## Number of sgRNAs
+
+Each gene is represented by up to five sgRNAs. We can test if all or only some of the 5 sgRNAs are "behaving" in the same way in the same conditions, more mathematically speaking we can estimate the correlation of every sgRNA with another. First let's summarize how many genes have 5, 4, 3 sgRNAs and so on associated with them.
+
+```{r, , fig.width = 6, fig.height = 3.5}
+# N unique sgRNAs in dataset
+paste0("Number of unique sgRNAs: ", unique(df_main$sgRNA) %>% length)
+
+# N genes with 1,2,3,4 or 5 sgRNAs
+plot_sgRNAs_per_gene <- df_main %>%
+  group_by(sgRNA_type, sgRNA_target) %>%
+  summarize(n_sgRNAs = length(unique(sgRNA_position)), .groups = "drop_last") %>%
+  count(n_sgRNAs) %>% filter(n_sgRNAs <= 5) %>%
+  ggplot(aes(x = factor(n_sgRNAs, 5:1), y = n, label = n)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(size = 3, nudge_y = 200, color = grey(0.5)) +
+  facet_grid(~ sgRNA_type) +
+  labs(x = "n sgRNAs / target", y = "n targets") +
+  coord_cartesian(ylim = c(-50, 3500)) +
+  custom_theme()
+
+print(plot_sgRNAs_per_gene)
+#save_plot(plot_sgRNAs_per_gene, width = 6, height = 3.5)
+```
+
+# Fitness analysis
+
+## Sample overview
+
+Histogram of fitness score per condition (gene level, not sgRNA level.
+
+```{r}
+df_main %>% filter(time == 10) %>%
+  select(sgRNA_target, condition, wmean_fitness) %>% distinct() %>% ungroup() %>%
+  ggplot(aes(x = wmean_fitness)) +
+  geom_histogram(bins = 50) +
+  facet_wrap(~ condition, ncol = 4) +
+  lims(x = c(-10, 10)) +
+  custom_theme()
+```
+
+## Fitness of amino acid biosynthesis pathways
+
+First step is to obtain KEGG pathway annotation for all genes in order to look up gene fitness for the diffferent amino acid biosynthesis pathways. KEGG is the best curated resource to look up pathway annotation per gene. To get a comprehensive table requires several calls to the KEGG API, first to map genes to pathway IDs, then to map IDs to real names.
+
+```{r}
+# get mapping of pathways for each gene
+df_kegg <- keggLink("pathway", "syn") %>%
+  enframe(name = "locus", value = "kegg_pathway_id") %>%
+  
+  # get list of pathways with name/ID pairs
+  left_join(by = "kegg_pathway_id",
+    keggList("pathway", "syn") %>%
+    enframe(name = "kegg_pathway_id", value = "kegg_pathway")
+  ) %>%
+  
+  # get list of gene/enzyme names
+  left_join(by = "locus",
+    keggList("syn") %>%
+    enframe(name = "locus", value = "kegg_gene") %>%
+    mutate(kegg_gene_short = str_extract(kegg_gene, "^[a-zA-Z0-9]*;") %>% 
+      str_remove(";"))
+  ) %>%
+  
+  # trim useless prefixes
+  mutate(
+    locus = str_remove(locus, "syn:"),
+    kegg_pathway_id = str_remove(kegg_pathway_id, "path:"),
+    kegg_pathway = str_remove(kegg_pathway, " - Synechocystis sp. PCC 6803")
+  )
+
+head(df_kegg)
+```
+Relevant KEGG pathways:
+
+- Arginine biosynthesis
+- Alanine, aspartate and glutamate metabolism
+- Glycine, serine and threonine metabolism
+- Cysteine and methionine metabolism
+- Valine, leucine and isoleucine biosynthesis
+- Lysine biosynthesis
+- Arginine and proline metabolism
+- Histidine metabolism
+- Tyrosine metabolism
+- Phenylalanine metabolism
+- Tryptophan metabolism
+- Phenylalanine, tyrosine and tryptophan biosynthesis
+- Biosynthesis of amino acids
+
+
+```{r}
+list_pathways <- c(
+  "Arginine biosynthesis",
+  "Alanine, aspartate and glutamate metabolism",
+  "Glycine, serine and threonine metabolism",
+  "Cysteine and methionine metabolism",
+  "Valine, leucine and isoleucine biosynthesis",
+  "Lysine biosynthesis",
+  "Arginine and proline metabolism",
+  "Histidine metabolism",
+  "Tyrosine metabolism",
+  "Phenylalanine metabolism",
+  "Tryptophan metabolism",
+  "Phenylalanine, tyrosine and tryptophan biosynthesis",
+  "Biosynthesis of amino acids"
+)
+
+list_pathway_heatmaps <- lapply(list_pathways, function(pw) {
+  df_kegg %>%
+    filter(kegg_pathway == pw) %>%
+    select(locus) %>% inner_join(df_main, by = "locus") %>%
+    mutate(wmean_fitness = wmean_fitness %>% replace(., . > 3, 3) %>% replace(., . < -3, -3)) %>%
+    ggplot(aes(x = condition, y = fct_rev(sgRNA_target), fill = wmean_fitness)) +
+    geom_tile() + custom_theme() +
+    labs(title = pw, x = "condition", y = "gene") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    scale_fill_gradientn(colours = c(custom_colors[1], grey(0.9), custom_colors[2]),
+      limits = c(-3, 3))
+})
+```
+
+
+```{r, fig.width = 7, fig.height = 12}
+#theme(plot.margin = unit(c(12,12,12,12), "points")),
+ggarrange(ncol = 2, nrow = 3,
+  list_pathway_heatmaps[[1]],
+  list_pathway_heatmaps[[2]],
+  list_pathway_heatmaps[[3]],
+  list_pathway_heatmaps[[4]],
+  list_pathway_heatmaps[[5]],
+  list_pathway_heatmaps[[6]]
+)
+```
+
+```{r, fig.width = 7, fig.height = 12}
+ggarrange(ncol = 2, nrow = 3,
+  list_pathway_heatmaps[[7]],
+  list_pathway_heatmaps[[8]],
+  list_pathway_heatmaps[[9]],
+  list_pathway_heatmaps[[10]],
+  list_pathway_heatmaps[[11]],
+  list_pathway_heatmaps[[12]]
+)
+```
+
+# Export summary table of all genes and conditions
+
+Export a summary table of all genes and conditions in wide format, so that it's easy for other people to look up single conditions. Also save complete output in long format.
+
+```{r}
+df_main %>% ungroup %>%
+  filter(sgRNA_type == "gene") %>%
+  select(locus, sgRNA_target, gene_name, condition, wmean_fitness) %>% 
+  distinct %>%
+  pivot_wider(names_from = condition, values_from = wmean_fitness) %>%
+  write_csv("../data/output/fitness_summary.csv")
+
+df_main %>%
+  filter(sgRNA_type == "gene", time == 10) %>%
+  select(locus, gene_name, protein, sgRNA_target, sgRNA_type, condition, date, wmean_fitness,
+    sd_fitness) %>% distinct() %>%
+  write_csv("../data/output/fitness_genes.csv")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
