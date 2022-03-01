@@ -8,9 +8,18 @@ This repository contains data from the analysis of a **CRISPRi repression librar
 
 All care was taken to adhere to good scientific practice in terms of statistics, reproducibility and code documentation. Please report any errors by filing a [github issue](https://github.com/m-jahn/R-notebook-amino-acids/issues) for this repository, or contact michael.jahn@scilifelab.se.
 
+
+### Contents
+
+- `data` - directory containing the input and output data
+- `docs`- rendered pipeline in `html` format
+  - [Investigation of the effect of amino acid supplementation on fitness](https://m-jahn.github.io/R-notebook-amino-acids/Amino_acid_analysis.nb.html)
+- `figures` - exported figures from pipelines
+- `pipeline` - data processing pipelines, R markdown format (`.Rmd`)
+
 ### How to run the pipeline(s)
 
-The pipelines collected in this repository are self-contained and executable. The code _and_ the documentation are part of one and the same R markdown document for each pipeline. Pipelines can be downloaded and executed from the `pipeline` sub-folders. To simply view the rendered pipelines follow the links to the `*.html` reports at [Contents](#Contents).
+The pipelines in this repository are self-contained and executable. The code _and_ the documentation are part of one and the same R markdown document for each pipeline. Pipelines can be downloaded and executed from the `pipeline` sub-folders. To simply view the rendered pipelines follow the links to the `*.html` reports at [Contents](#Contents).
 
 To download the repository on your local drive use `git clone` in a (linux) terminal:
 
@@ -26,7 +35,3 @@ Alternatively, open an interactive R session and render the R markdown pipeline:
 require(rmarkdown)
 rmarkdown::render("pipeline.Rmd")
 ```
-
-### Contents
-
-- [_Synechocystis_ CRISPRi library to investigate the effect of amino cid supplementation](https://m-jahn.github.io/R-notebook-amino-acids/Amino_acid_analysis.nb.html)
