@@ -159,8 +159,15 @@ df_uniprot <- get_uniprot(uniprot_url) %>%
   mutate(locus = str_remove_all(locus, "syn:|;")) %>%
   filter(!is.na(locus))
 
+# main table with all sgRNAs
 df_main <- left_join(df_main, filter(df_uniprot, !duplicated(locus)),
   by = "locus")
+
+# reduced table with gene fitness only
+df_gene <- df_main %>%
+  filter(sgRNA_type == "gene", time == 10) %>%
+  select(locus, gene_name, protein, sgRNA_target, sgRNA_type, condition, date, wmean_fitness,
+    sd_fitness) %>% distinct()
 ```
 
 
@@ -196,8 +203,7 @@ print(plot_sgRNAs_per_gene)
 Histogram of fitness score per condition (gene level, not sgRNA level.
 
 ```{r}
-df_main %>% filter(time == 10) %>%
-  select(sgRNA_target, condition, wmean_fitness) %>% distinct() %>% ungroup() %>%
+df_gene %>%
   ggplot(aes(x = wmean_fitness)) +
   geom_histogram(bins = 50) +
   facet_wrap(~ condition, ncol = 4) +
@@ -237,22 +243,8 @@ df_kegg <- keggLink("pathway", "syn") %>%
 
 head(df_kegg)
 ```
+
 Relevant KEGG pathways:
-
-- Arginine biosynthesis
-- Alanine, aspartate and glutamate metabolism
-- Glycine, serine and threonine metabolism
-- Cysteine and methionine metabolism
-- Valine, leucine and isoleucine biosynthesis
-- Lysine biosynthesis
-- Arginine and proline metabolism
-- Histidine metabolism
-- Tyrosine metabolism
-- Phenylalanine metabolism
-- Tryptophan metabolism
-- Phenylalanine, tyrosine and tryptophan biosynthesis
-- Biosynthesis of amino acids
-
 
 ```{r}
 list_pathways <- c(
@@ -267,16 +259,30 @@ list_pathways <- c(
   "Tyrosine metabolism",
   "Phenylalanine metabolism",
   "Tryptophan metabolism",
-  "Phenylalanine, tyrosine and tryptophan biosynthesis",
-  "Biosynthesis of amino acids"
+  "Phenylalanine, tyrosine and tryptophan biosynthesis"
 )
+```
+
+Function to cluster genes by fitness over all conditions:
+
+```{r}
+# function to cluster one variable by values of another
+fct_cluster <- function(variable, group, value, method = "ward.D2") {
+  df <- tibble(variable = variable, group = group, value = value)
+  df <- pivot_wider(df, names_from = group, values_from = value)
+  mat <- as.matrix(column_to_rownames(df, var = "variable"))
+  cl <- hclust(dist(mat), method = method)
+  ord <- order.dendrogram(as.dendrogram(cl))
+  factor(variable, unique(variable)[ord])
+}
 
 list_pathway_heatmaps <- lapply(list_pathways, function(pw) {
   df_kegg %>%
     filter(kegg_pathway == pw) %>%
-    select(locus) %>% inner_join(df_main, by = "locus") %>%
+    select(locus) %>% inner_join(df_gene, by = "locus") %>%
+    mutate(sgRNA_target = fct_cluster(sgRNA_target, condition, wmean_fitness)) %>%
     mutate(wmean_fitness = wmean_fitness %>% replace(., . > 3, 3) %>% replace(., . < -3, -3)) %>%
-    ggplot(aes(x = condition, y = fct_rev(sgRNA_target), fill = wmean_fitness)) +
+    ggplot(aes(x = condition, y = sgRNA_target, fill = wmean_fitness)) +
     geom_tile() + custom_theme() +
     labs(title = pw, x = "condition", y = "gene") +
     theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
@@ -287,7 +293,6 @@ list_pathway_heatmaps <- lapply(list_pathways, function(pw) {
 
 
 ```{r, fig.width = 7, fig.height = 12}
-#theme(plot.margin = unit(c(12,12,12,12), "points")),
 ggarrange(ncol = 2, nrow = 3,
   list_pathway_heatmaps[[1]],
   list_pathway_heatmaps[[2]],
@@ -308,6 +313,74 @@ ggarrange(ncol = 2, nrow = 3,
   list_pathway_heatmaps[[12]]
 )
 ```
+
+## Fitness as dot plots
+
+A different representation of the same data, this time looking at dot plots showing the full distribution of the data.
+
+```{r, fig.width = 6, fig.height = 3}
+print_dotplot <- function(pw, cond){
+  df_kegg %>%
+  filter(kegg_pathway == pw) %>%
+  select(locus) %>% inner_join(df_gene, by = "locus") %>%
+  mutate(sgRNA_target = fct_cluster(sgRNA_target, condition, wmean_fitness)) %>%
+  mutate(condition = if_else(condition %in% cond, condition, "Other") %>%
+    factor(., c(cond, "Other"))) %>%
+  ggplot(aes(x = sgRNA_target, y = wmean_fitness,
+    color = condition, size = condition %in% cond)) +
+  geom_point(alpha = 0.8) +
+  custom_theme() + theme(legend.position = "right") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(title = pw, x = "", y = "fitness") +
+  scale_fill_manual(values = custom_colors[c(seq_along(cond),5)]) +
+  scale_color_manual(values = custom_colors[c(seq_along(cond),5)]) +
+  scale_size_discrete(range = c(2, 4))
+}
+```
+
+
+```{r, fig.width = 6, fig.height = 3}
+print_dotplot(
+  pw = "Valine, leucine and isoleucine biosynthesis",
+  cond = "Leu"
+)
+
+print_dotplot(
+  pw = "Arginine biosynthesis",
+  cond = "Arg"
+)
+
+print_dotplot(
+  pw = "Arginine and proline metabolism",
+  cond = "Arg"
+)
+
+print_dotplot(
+  pw = "Alanine, aspartate and glutamate metabolism",
+  cond = c("Ala", "Glu")
+)
+
+print_dotplot(
+  pw = "Glycine, serine and threonine metabolism",
+  cond = c("Gly", "Thr")
+)
+
+print_dotplot(
+  pw = "Cysteine and methionine metabolism",
+  cond = "Cys"
+)
+
+print_dotplot(
+  pw = "Phenylalanine metabolism",
+  cond = "Phe"
+)
+
+print_dotplot(
+  pw = "Phenylalanine, tyrosine and tryptophan biosynthesis",
+  cond = "Phe"
+)
+```
+
 
 # Export summary table of all genes and conditions
 
