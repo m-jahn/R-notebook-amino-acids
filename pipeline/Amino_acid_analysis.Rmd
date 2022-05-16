@@ -92,7 +92,7 @@ Load raw data. The main table contains already normalized quantification of all 
 
 ```{r}
 # load main table with processed sequencing data
-load("../data/input/DESeq2_result.Rdata")
+load("../data/input/result.Rdata")
 df_main <- DESeq_result_table
 rm(DESeq_result_table)
 ```
@@ -104,7 +104,6 @@ Different annotation columns are added to the main data frame, including a short
 Pathway annotation from KEGG is later in the pipeline added using the `KEGGREST` package.
 
 ```{r, message = FALSE}
-
 df_main <- df_main %>%
   mutate(sgRNA_type = if_else(grepl("^nc_", sgRNA), "ncRNA", "gene")) %>%
   ungroup %>%
@@ -379,6 +378,46 @@ print_dotplot(
   pw = "Phenylalanine, tyrosine and tryptophan biosynthesis",
   cond = "Phe"
 )
+```
+
+## Fitness as condition-wise comparison
+
+- generalized function to plot fitness of selected conditions against each other
+
+```{r}
+make_fitness_plot <- function(data, vars, title = NULL) {
+  # prepare data for two  variables each
+  data %>% ungroup %>%
+    filter(condition %in% vars, sgRNA_type == "gene") %>%
+    select(locus, sgRNA_target, condition, wmean_fitness) %>% distinct %>%
+    pivot_wider(names_from = condition, values_from = wmean_fitness) %>%
+    mutate(
+      dfit = get(vars[1]) - get(vars[2]),
+      significant = !between(dfit, quantile(dfit, probs = c(0.003)),
+        quantile(dfit, probs = c(0.997))),
+      sgRNA_target = if_else(significant, sgRNA_target, "")) %>%
+    
+    # plot
+    ggplot(aes(x = get(vars[1]), y = get(vars[2]), 
+      color = significant, label = sgRNA_target)) +
+    geom_point(size = 1) + custom_theme(legend.position = 0) +
+    geom_abline(intercept = 0, slope = 1, col = grey(0.5), lty = 2, size = 0.8) +
+    geom_abline(intercept = 4, slope = 1, col = grey(0.5), lty = 2, size = 0.8) +
+    geom_abline(intercept = -4, slope = 1, col = grey(0.5), lty = 2, size = 0.8) +
+    geom_text_repel(size = 3, max.overlaps = 50) +
+    labs(title = title, x = vars[1], y = vars[2]) +
+    coord_cartesian(xlim = c(-7, 7), ylim = c(-7, 7)) +
+    scale_color_manual(values = c(grey(0.5), custom_colors[2]))
+}
+```
+
+- selected conditions against control `Ctr`
+- control is without added amino acid
+
+```{r, fig.width = 5, fig.height = 5}
+for (cond in unique(df_gene$condition)[-4]) {
+  print(make_fitness_plot(df_gene, vars = c("Ctr", cond), title = cond))
+}
 ```
 
 
